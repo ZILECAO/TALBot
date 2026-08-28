@@ -2,9 +2,14 @@
 
 use std::io::{Read as _, Write as _};
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value, json};
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 
 use crate::question;
 
@@ -18,13 +23,15 @@ const HIDDEN_INPUT: &str =
 /// decision, and write the hook decision to stdout. Any missing or expired
 /// approval is denied so Codex never falls back to an unattended local prompt.
 pub fn permission_request(timeout_secs: u64) -> Result<()> {
-    let response = match read_and_collect_permission(timeout_secs) {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!("talbot permission hook: {error:#}");
-            deny_response("You did not approve this in Telegram, so TALBot blocked it.")
-        }
-    };
+    let cancelled = cancellation_flag()?;
+    let response =
+        match read_and_collect_permission(timeout_secs, || cancelled.load(Ordering::Acquire)) {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("talbot permission hook: {error:#}");
+                deny_response("You did not approve this in Telegram, so TALBot blocked it.")
+            }
+        };
 
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
@@ -33,15 +40,31 @@ pub fn permission_request(timeout_secs: u64) -> Result<()> {
     writeln!(stdout).context("cannot finish the PermissionRequest hook decision")
 }
 
-fn read_and_collect_permission(timeout_secs: u64) -> Result<Value> {
+fn cancellation_flag() -> Result<Arc<AtomicBool>> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    for signal in [SIGTERM, SIGINT, SIGHUP] {
+        signal_hook::flag::register(signal, Arc::clone(&cancelled))
+            .context("cannot register the permission-hook cancellation handler")?;
+    }
+    Ok(cancelled)
+}
+
+fn read_and_collect_permission(
+    timeout_secs: u64,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<Value> {
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
         .context("cannot read the PermissionRequest hook event")?;
-    collect_permission(&input, timeout_secs)
+    collect_permission(&input, timeout_secs, is_cancelled)
 }
 
-fn collect_permission(input: &str, timeout_secs: u64) -> Result<Value> {
+fn collect_permission(
+    input: &str,
+    timeout_secs: u64,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<Value> {
     let event: Value = serde_json::from_str(input).context("invalid hook event JSON")?;
     ensure!(
         event["hook_event_name"].as_str() == Some("PermissionRequest"),
@@ -50,7 +73,8 @@ fn collect_permission(input: &str, timeout_secs: u64) -> Result<Value> {
 
     let message = permission_message(&event)?;
     let choices = vec![ALLOW_LABEL.to_string(), DENY_LABEL.to_string()];
-    let answer = question::ask(&message, &choices, timeout_secs, None)?;
+    let answer =
+        question::ask_with_cancellation(&message, &choices, timeout_secs, None, is_cancelled)?;
 
     if is_allow_answer(&answer) {
         Ok(allow_response())

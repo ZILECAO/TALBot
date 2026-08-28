@@ -107,9 +107,11 @@ press for a new expired action. Typing `allow`, `approve`, or `yes` also
 approves a permission request.
 
 The Codex tool call that triggered an approval must remain alive while TALBot
-waits. If Codex cancels that wait, TALBot marks the Telegram prompt as
-**🟠 Action cancelled** and removes its buttons. A late answer cannot approve
-the abandoned request.
+waits. If Codex cancels that wait, TALBot catches the normal termination
+signals, marks the Telegram prompt as **🟠 Action cancelled**, and removes its
+buttons. A late answer cannot approve the abandoned request. If Codex is killed
+so abruptly that no cleanup code can run, TALBot closes the abandoned prompt
+before sending the next interactive question.
 
 Permission messages lead with the decision and the command or change. A visual
 divider separates that important content from the short reason and compact

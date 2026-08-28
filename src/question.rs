@@ -24,19 +24,6 @@ const QUESTION_EDIT_ATTEMPTS: usize = 3;
 const QUESTION_EDIT_TIMEOUT: Duration = Duration::from_secs(5);
 const QUESTION_EDIT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
-/// Ask a multiple-choice question in the configured private Telegram chat and
-/// wait for the user to tap a button or send a text answer.
-pub fn ask(
-    question: &str,
-    choices: &[String],
-    timeout_secs: u64,
-    conversation_title: Option<&str>,
-) -> Result<String> {
-    ask_with_cancellation(question, choices, timeout_secs, conversation_title, || {
-        false
-    })
-}
-
 pub(crate) fn ask_with_cancellation(
     question: &str,
     choices: &[String],
@@ -139,7 +126,13 @@ pub(crate) fn ask_with_cancellation(
             };
         }
         let poll_secs = remaining.as_secs().clamp(1, POLL_TIMEOUT_SECS);
-        let updates = get_updates(&token, offset, poll_secs)?;
+        let updates = match get_updates(&token, offset, poll_secs) {
+            Ok(updates) => updates,
+            Err(_) if is_cancelled() => {
+                return cancel_question(&token, &chat, message_id, question, conversation_title);
+            }
+            Err(error) => return Err(error),
+        };
         if is_cancelled() {
             return cancel_question(&token, &chat, message_id, question, conversation_title);
         }
